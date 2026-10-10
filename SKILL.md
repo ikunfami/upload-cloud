@@ -1,19 +1,33 @@
 ---
 name: upload-cloud
 author: ikunfami
-description: "Upload any local file (images, documents, archives, etc.) to cloud storage — Aliyun OSS or Tencent Cloud COS. The user says where to upload (阿里云/OSS or 腾讯云/COS); if not specified, a configurable default provider (config, default Aliyun) is used. Supports image compression, batch uploads, and returns public URLs. 将本地任意文件上传到阿里云 OSS 或腾讯云 COS，支持图片压缩、批量上传、返回公共 URL。"
+description: "Upload any local file (images, documents, archives, etc.) to cloud storage or image hosts — Aliyun OSS, Tencent COS, SM.MS, GitHub, Qiniu, Imgur, Upyun. The user says where to upload; if not specified, a configurable default provider (config, default Aliyun) is used. Supports image compression, batch uploads, and returns public URLs. 将本地任意文件上传到阿里云 OSS / 腾讯云 COS / SM.MS / GitHub / 七牛云 / Imgur / 又拍云，支持图片压缩、批量上传、返回公共 URL。"
 ---
 
-# Upload Files to Cloud Storage (Aliyun OSS / Tencent COS)
+# Upload Files to Cloud Storage (OSS / COS / SM.MS / GitHub / Qiniu / Imgur / Upyun)
 
 ## When to Use
-Use this skill when the user asks to upload local images, documents, archives, or any other files to cloud storage — e.g. "upload file to OSS" / "上传到阿里云" / "上传到腾讯云 COS" / "put this file on COS".
+Use this skill when the user asks to upload local images, documents, archives, or any other files to cloud storage or an image host — e.g. "upload file to OSS" / "上传到阿里云" / "上传到腾讯云 COS" / "传到 SM.MS" / "传图床" / "put this file on COS".
+
+## Supported Providers
+
+| Provider | Aliases | Needs config |
+|---|---|---|
+| Aliyun OSS | `aliyun`, `oss`, `alibaba`, `阿里云` | access_key_id, access_key_secret, bucket, endpoint |
+| Tencent COS | `tencent`, `cos`, `qcloud`, `腾讯云` | secret_id, secret_key, bucket, region |
+| SM.MS | `smms`, `sm.ms` | token |
+| GitHub | `github`, `gh` | token (repo scope), owner, repo |
+| Qiniu | `qiniu`, `七牛云` | access_key, secret_key, bucket, domain |
+| Imgur | `imgur` | client_id |
+| Upyun 又拍云 | `upyun`, `又拍云` | bucket, operator, password, domain |
+
+SM.MS / GitHub / Qiniu / Imgur / Upyun are implemented with plain HTTP (no SDK), so no extra dependencies are needed.
 
 ## Choosing the Provider
 Provider is resolved in this priority order:
 
-1. **What the user said**: 阿里云 / OSS / ali-oss → `aliyun`; 腾讯云 / COS / qcloud → `tencent`. Pass it to the script with `--provider`.
-2. **Environment variable** `CLOUD_PROVIDER` (`aliyun` or `tencent`).
+1. **What the user said**: map their wording to a provider using the alias table above. Pass it to the script with `--provider`.
+2. **Environment variable** `CLOUD_PROVIDER`.
 3. **Config default**: the `provider` key in the `[skills.cloud]` table (default `aliyun`).
 
 If the user does not say where to upload, use the configured default (Aliyun unless changed).
@@ -21,13 +35,13 @@ If the user does not say where to upload, use the configured default (Aliyun unl
 ## Required Configuration
 Configuration is read from (in priority order — environment variables win):
 
-1. Environment variables (`CLOUD_PROVIDER`, plus `OSS_*` for Aliyun or `COS_*` for Tencent), or
+1. Environment variables (`CLOUD_PROVIDER`, plus the per-provider variables listed below), or
 2. A `config.toml` placed next to `upload.js` (copy `config.toml.example` to get started), or
 3. The `[skills.cloud]` tables in `~/.kimi-code/config.toml` (the agent exports them as environment variables before running the script).
 
 ```toml
 [skills.cloud]
-provider = "aliyun"   # Default provider when the user does not specify one: "aliyun" or "tencent"
+provider = "aliyun"   # Default provider when the user does not specify one
 
 [skills.cloud.aliyun]
 access_key_id = "LTAI..."
@@ -46,13 +60,45 @@ region = "ap-guangzhou"
 prefix = "uploads"
 default_quality = 80
 public_url = ""
+
+[skills.cloud.smms]
+token = ""   # Required; from https://sm.ms/home/apitoken (the API rejects anonymous uploads)
+
+[skills.cloud.github]
+token = ""        # https://github.com/settings/tokens — repo scope
+owner = ""        # GitHub user/org
+repo = ""         # repository
+branch = "main"
+prefix = "uploads"
+public_url = ""   # Optional; e.g. jsDelivr https://cdn.jsdelivr.net/gh/owner/repo@branch
+
+[skills.cloud.qiniu]
+access_key = ""
+secret_key = ""
+bucket = ""
+domain = ""       # Required: bound CDN/test domain, e.g. http://xxx.bkt.clouddn.com
+prefix = "uploads"
+default_quality = 80
+
+[skills.cloud.imgur]
+client_id = ""    # https://api.imgur.com/oauth2/addclient
+
+[skills.cloud.upyun]
+bucket = ""
+operator = ""
+password = ""
+domain = ""       # Required: bound domain, e.g. https://xxx.b0.upaiyun.com
+prefix = "uploads"
+default_quality = 80
 ```
 
-Only the table for the chosen provider needs to be filled. If that table does not exist or any required field is empty, prompt the user to fill in real credentials first. Never commit `config.toml` with real credentials.
+Only the table for the chosen provider needs to be filled. If that table does not exist or any required field is empty, prompt the user to fill in real credentials first (and tell them where to get them — see the per-provider links above). Never commit `config.toml` with real credentials.
+
+Environment variable names follow the config keys: `OSS_ACCESS_KEY_ID`, `COS_SECRET_ID`, `SMMS_TOKEN`, `GITHUB_TOKEN` / `GITHUB_OWNER` / `GITHUB_REPO` / `GITHUB_BRANCH`, `QINIU_ACCESS_KEY` / `QINIU_DOMAIN`, `IMGUR_CLIENT_ID`, `UPYUN_BUCKET` / `UPYUN_OPERATOR` / `UPYUN_PASSWORD` / `UPYUN_DOMAIN`, etc.
 
 ## Workflow
-1. **Determine the provider** from the user's request; if unspecified, use the `provider` default from the config.
-2. **Read config**: if a `config.toml` exists next to `upload.js`, `upload.js` reads the `[skills.cloud]` tables from it automatically. Otherwise, parse `~/.kimi-code/config.toml` with Python's built-in `tomllib`, extract the `[skills.cloud]` / `[skills.cloud.aliyun]` / `[skills.cloud.tencent]` tables, and export them as environment variables (`CLOUD_PROVIDER`, `OSS_ACCESS_KEY_ID`, ..., `COS_SECRET_ID`, ...).
+1. **Determine the provider** from the user's request using the alias table; if unspecified, use the `provider` default from the config.
+2. **Read config**: if a `config.toml` exists next to `upload.js`, `upload.js` reads the `[skills.cloud]` tables from it automatically. Otherwise, parse `~/.kimi-code/config.toml` with Python's built-in `tomllib`, extract the `[skills.cloud]` / `[skills.cloud.<provider>]` tables, and export them as environment variables (`CLOUD_PROVIDER`, `OSS_ACCESS_KEY_ID`, ..., `COS_SECRET_ID`, ..., etc.).
 3. **Prepare the helper script**: the helper script should live at `~/.kimi/skills/upload-cloud/upload.js`. If it does not exist, create the directory and write the `package.json` and `upload.js` from the "Helper Script Source" section below into that directory, then run `npm install`.
 4. **Run the upload**: build the command according to the user's needs. Example:
    ```bash
@@ -84,13 +130,21 @@ Only the table for the chosen provider needs to be filled. If that table does no
 - If the user specifies `--prefix`, it overrides the default `prefix` from the provider's config table.
 - The millisecond timestamp basically avoids overwrites; for stronger uniqueness, an extra random code can be appended.
 
+## Provider-specific Notes
+- **SM.MS**: URL is allocated by the service at upload time (cannot be predicted in `--dry-run`, where `url` is `null`). SM.MS may reject/replace duplicate content. Anonymous uploads have rate limits; bind a token for higher limits.
+- **GitHub**: the file lands in the repo at `{prefix}/{timestamp}.{ext}`; the returned URL is the raw.githubusercontent.com link unless `public_url` (e.g. a jsDelivr CDN URL) is set. Re-uploading the same key overwrites the file (a new commit).
+- **Qiniu**: `domain` is required — the upload token and form upload are computed in-script (HMAC-SHA1), no SDK needed.
+- **Imgur**: the returned link is whatever Imgur allocates; anonymous client-id uploads are subject to their rate limits.
+- **Upyun**: uses the REST API with Basic auth (operator + password); `domain` is required.
+- All HTTP-based providers (SM.MS / GitHub / Qiniu / Imgur / Upyun) use Node's built-in `fetch` — no extra npm dependencies.
+
 ## Notes
 - **Any file**: non-image files are uploaded as-is, ignoring `--max-width` / `--max-height` / `--quality` / `--max-size`.
 - **Compress by default**: images are compressed with `default_quality` (default 80) unless `--no-compress` is passed.
 - **Compression failure**: automatically falls back to the original image so the upload never breaks.
 - **Security**: never upload sensitive files such as `.env`, SSH private keys, or password files.
 - **Batch**: `--file` can be passed multiple times; any failure makes the script exit with a non-zero code.
-- **Testing**: use `--dry-run` to inspect the provider, generated key, URL, and compressed size without calling the cloud.
+- **Testing**: use `--dry-run` to inspect the provider, generated key, URL, and compressed size without calling the service.
 
 ## Helper Script Source
 
@@ -98,8 +152,8 @@ Only the table for the chosen provider needs to be filled. If that table does no
 ```json
 {
   "name": "upload-cloud-helper",
-  "version": "1.0.0",
-  "description": "Helper script for uploading files to Aliyun OSS or Tencent Cloud COS",
+  "version": "1.1.0",
+  "description": "Helper script for uploading files to Aliyun OSS, Tencent COS, SM.MS, GitHub, Qiniu, Imgur or Upyun",
   "type": "module",
   "private": true,
   "bin": {
@@ -120,6 +174,7 @@ Only the table for the chosen provider needs to be filled. If that table does no
 import fs from 'node:fs/promises';
 import { readFileSync } from 'node:fs';
 import path from 'node:path';
+import crypto from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import mime from 'mime-types';
 import OSS from 'ali-oss';
@@ -138,12 +193,86 @@ const PROVIDER_ALIASES = {
   ali: 'aliyun',
   oss: 'aliyun',
   alibaba: 'aliyun',
+  阿里云: 'aliyun',
   tencent: 'tencent',
   tencentcloud: 'tencent',
   cos: 'tencent',
   qcloud: 'tencent',
-  阿里云: 'aliyun',
   腾讯云: 'tencent',
+  smms: 'smms',
+  'sm.ms': 'smms',
+  sm: 'smms',
+  github: 'github',
+  gh: 'github',
+  qiniu: 'qiniu',
+  qiniuyun: 'qiniu',
+  七牛: 'qiniu',
+  七牛云: 'qiniu',
+  imgur: 'imgur',
+  upyun: 'upyun',
+  又拍云: 'upyun',
+  又拍: 'upyun',
+};
+
+const PROVIDER_KEY_MAPS = {
+  aliyun: {
+    access_key_id: 'OSS_ACCESS_KEY_ID',
+    access_key_secret: 'OSS_ACCESS_KEY_SECRET',
+    bucket: 'OSS_BUCKET',
+    endpoint: 'OSS_ENDPOINT',
+    prefix: 'OSS_PREFIX',
+    public_url: 'OSS_PUBLIC_URL',
+    default_quality: 'OSS_DEFAULT_QUALITY',
+  },
+  tencent: {
+    secret_id: 'COS_SECRET_ID',
+    secret_key: 'COS_SECRET_KEY',
+    bucket: 'COS_BUCKET',
+    region: 'COS_REGION',
+    prefix: 'COS_PREFIX',
+    public_url: 'COS_PUBLIC_URL',
+    default_quality: 'COS_DEFAULT_QUALITY',
+  },
+  smms: {
+    token: 'SMMS_TOKEN',
+  },
+  github: {
+    token: 'GITHUB_TOKEN',
+    owner: 'GITHUB_OWNER',
+    repo: 'GITHUB_REPO',
+    branch: 'GITHUB_BRANCH',
+    prefix: 'GITHUB_PREFIX',
+    public_url: 'GITHUB_PUBLIC_URL',
+  },
+  qiniu: {
+    access_key: 'QINIU_ACCESS_KEY',
+    secret_key: 'QINIU_SECRET_KEY',
+    bucket: 'QINIU_BUCKET',
+    domain: 'QINIU_DOMAIN',
+    prefix: 'QINIU_PREFIX',
+    default_quality: 'QINIU_DEFAULT_QUALITY',
+  },
+  imgur: {
+    client_id: 'IMGUR_CLIENT_ID',
+  },
+  upyun: {
+    bucket: 'UPYUN_BUCKET',
+    operator: 'UPYUN_OPERATOR',
+    password: 'UPYUN_PASSWORD',
+    domain: 'UPYUN_DOMAIN',
+    prefix: 'UPYUN_PREFIX',
+    default_quality: 'UPYUN_DEFAULT_QUALITY',
+  },
+};
+
+const PROVIDER_REQUIRED = {
+  aliyun: ['access_key_id', 'access_key_secret', 'bucket', 'endpoint'],
+  tencent: ['secret_id', 'secret_key', 'bucket', 'region'],
+  smms: [],
+  github: ['token', 'owner', 'repo'],
+  qiniu: ['access_key', 'secret_key', 'bucket', 'domain'],
+  imgur: ['client_id'],
+  upyun: ['bucket', 'operator', 'password', 'domain'],
 };
 
 function normalizeProvider(raw) {
@@ -183,35 +312,14 @@ function parseArgs(argv) {
   return args;
 }
 
-const PROVIDER_KEY_MAPS = {
-  aliyun: {
-    access_key_id: 'OSS_ACCESS_KEY_ID',
-    access_key_secret: 'OSS_ACCESS_KEY_SECRET',
-    bucket: 'OSS_BUCKET',
-    endpoint: 'OSS_ENDPOINT',
-    prefix: 'OSS_PREFIX',
-    public_url: 'OSS_PUBLIC_URL',
-    default_quality: 'OSS_DEFAULT_QUALITY',
-  },
-  tencent: {
-    secret_id: 'COS_SECRET_ID',
-    secret_key: 'COS_SECRET_KEY',
-    bucket: 'COS_BUCKET',
-    region: 'COS_REGION',
-    prefix: 'COS_PREFIX',
-    public_url: 'COS_PUBLIC_URL',
-    default_quality: 'COS_DEFAULT_QUALITY',
-  },
-};
-
 function readLocalConfig() {
-  const result = { provider: '', aliyun: {}, tencent: {} };
+  const result = { provider: '', providers: {} };
   try {
     const configPath = path.join(path.dirname(fileURLToPath(import.meta.url)), 'config.toml');
     const text = readFileSync(configPath, 'utf8');
-    let section = null; // 'cloud' | 'aliyun' | 'tencent'
+    let section = null; // 'cloud' | provider name
     for (const line of text.split('\n')) {
-      const sec = line.match(/^\s*\[skills\.cloud(?:\.(aliyun|tencent))?\]\s*$/);
+      const sec = line.match(/^\s*\[skills\.cloud(?:\.([A-Za-z0-9_.-]+))?\]\s*$/);
       if (sec) {
         section = sec[1] || 'cloud';
         continue;
@@ -220,9 +328,14 @@ function readLocalConfig() {
       if (!m || !section) continue;
       if (section === 'cloud' && m[1] === 'provider') {
         result.provider = m[2];
-      } else if (section === 'aliyun' || section === 'tencent') {
-        const envKey = PROVIDER_KEY_MAPS[section][m[1]];
-        if (envKey) result[section][envKey] = m[2];
+        continue;
+      }
+      const keyMap = PROVIDER_KEY_MAPS[section];
+      if (!keyMap) continue;
+      const envKey = keyMap[m[1]];
+      if (envKey) {
+        if (!result.providers[section]) result.providers[section] = {};
+        result.providers[section][envKey] = m[2];
       }
     }
   } catch {
@@ -240,66 +353,41 @@ function loadConfig(args) {
     'aliyun';
 
   const keyMap = PROVIDER_KEY_MAPS[provider];
-  const localProvider = local[provider] || {};
-  const env = (k) => process.env[k] || localProvider[k] || '';
+  const localProvider = local.providers[provider] || {};
+  const get = (configKey) => process.env[keyMap[configKey]] || localProvider[keyMap[configKey]] || '';
 
+  const missing = PROVIDER_REQUIRED[provider].filter((k) => !get(k));
+  if (missing.length) {
+    throw new Error(
+      `Missing ${provider} configuration: ${missing.join(', ')} (set env vars or a [skills.cloud.${provider}] table in config.toml next to upload.js, or pass --provider <another>)`
+    );
+  }
+
+  const creds = {};
+  for (const configKey of Object.keys(keyMap)) {
+    creds[configKey] = get(configKey);
+  }
+  if (provider === 'github' && !creds.branch) {
+    creds.branch = 'main';
+  }
   if (provider === 'aliyun') {
-    const required = ['OSS_ACCESS_KEY_ID', 'OSS_ACCESS_KEY_SECRET', 'OSS_BUCKET', 'OSS_ENDPOINT'];
-    const missing = required.filter((k) => !env(k));
-    if (missing.length) {
-      throw new Error(
-        `Missing Aliyun OSS configuration: ${missing.join(', ')} (set env vars or a [skills.cloud.aliyun] table in config.toml next to upload.js, or pass --provider tencent)`
-      );
-    }
-  } else {
-    const required = ['COS_SECRET_ID', 'COS_SECRET_KEY', 'COS_BUCKET', 'COS_REGION'];
-    const missing = required.filter((k) => !env(k));
-    if (missing.length) {
-      throw new Error(
-        `Missing Tencent COS configuration: ${missing.join(', ')} (set env vars or a [skills.cloud.tencent] table in config.toml next to upload.js, or pass --provider aliyun)`
-      );
+    creds.secure = true;
+    if (creds.endpoint.startsWith('https://')) {
+      creds.endpoint = creds.endpoint.slice(8);
+    } else if (creds.endpoint.startsWith('http://')) {
+      creds.endpoint = creds.endpoint.slice(7);
+      creds.secure = false;
     }
   }
 
-  const shared = (k) => process.env[k] || localProvider[k] || '';
-  let endpoint = '';
-  let secure = true;
-  if (provider === 'aliyun') {
-    endpoint = env('OSS_ENDPOINT');
-    if (endpoint.startsWith('https://')) {
-      endpoint = endpoint.slice(8);
-    } else if (endpoint.startsWith('http://')) {
-      endpoint = endpoint.slice(7);
-      secure = false;
-    }
-  }
-
-  const rawQuality = shared(keyMap.default_quality);
+  const rawQuality = get('default_quality');
   const parsedQuality = rawQuality ? parseInt(rawQuality, 10) : NaN;
 
   return {
     provider,
-    aliyun:
-      provider === 'aliyun'
-        ? {
-            accessKeyId: env('OSS_ACCESS_KEY_ID'),
-            accessKeySecret: env('OSS_ACCESS_KEY_SECRET'),
-            bucket: env('OSS_BUCKET'),
-            endpoint,
-            secure,
-          }
-        : null,
-    tencent:
-      provider === 'tencent'
-        ? {
-            secretId: env('COS_SECRET_ID'),
-            secretKey: env('COS_SECRET_KEY'),
-            bucket: env('COS_BUCKET'),
-            region: env('COS_REGION'),
-          }
-        : null,
-    prefix: shared(keyMap.prefix),
-    publicUrl: shared(keyMap.public_url),
+    creds,
+    prefix: get('prefix'),
+    publicUrl: get('public_url'),
     defaultQuality: Number.isNaN(parsedQuality) ? 80 : parsedQuality,
   };
 }
@@ -318,13 +406,23 @@ function generateKey(filePath, prefix) {
 }
 
 function makePublicUrl(config, key) {
+  const c = config.creds;
   const base = config.publicUrl ? config.publicUrl.replace(/\/+$/, '') : null;
-  if (config.provider === 'aliyun') {
-    const c = config.aliyun;
-    return base ? `${base}/${key}` : `https://${c.bucket}.${c.endpoint}/${key}`;
+  switch (config.provider) {
+    case 'aliyun':
+      return base ? `${base}/${key}` : `https://${c.bucket}.${c.endpoint}/${key}`;
+    case 'tencent':
+      return base ? `${base}/${key}` : `https://${c.bucket}.cos.${c.region}.myqcloud.com/${key}`;
+    case 'github':
+      // Without a public_url the raw URL is only known after the API responds
+      return base ? `${base}/${key}` : null;
+    case 'qiniu':
+    case 'upyun':
+      return c.domain ? `${c.domain.replace(/\/+$/, '')}/${key}` : null;
+    default:
+      // smms / imgur: the URL is allocated by the service at upload time
+      return null;
   }
-  const c = config.tencent;
-  return base ? `${base}/${key}` : `https://${c.bucket}.cos.${c.region}.myqcloud.com/${key}`;
 }
 
 async function renderImage(image, mimeType, quality) {
@@ -376,50 +474,150 @@ async function compressImage(filePath, options) {
 
 function createClient(config) {
   if (config.provider === 'aliyun') {
-    const c = config.aliyun;
+    const c = config.creds;
     return {
       kind: 'oss',
       client: new OSS({
         endpoint: c.endpoint,
-        accessKeyId: c.accessKeyId,
-        accessKeySecret: c.accessKeySecret,
+        accessKeyId: c.access_key_id,
+        accessKeySecret: c.access_key_secret,
         bucket: c.bucket,
         secure: c.secure,
         timeout: 120000,
       }),
     };
   }
-  const c = config.tencent;
-  return {
-    kind: 'cos',
-    client: new COS({
-      SecretId: c.secretId,
-      SecretKey: c.secretKey,
-      FileParallelLimit: 3,
-      Timeout: 120000,
-    }),
-  };
+  if (config.provider === 'tencent') {
+    const c = config.creds;
+    return {
+      kind: 'cos',
+      client: new COS({
+        SecretId: c.secret_id,
+        SecretKey: c.secret_key,
+        FileParallelLimit: 3,
+        Timeout: 120000,
+      }),
+    };
+  }
+  // smms / github / qiniu / imgur / upyun: plain fetch, no SDK client needed
+  return { kind: config.provider };
 }
 
-async function putObject(target, config, key, buffer, mimeType) {
+async function fetchJson(url, options, label) {
+  const res = await fetch(url, options);
+  let json = null;
+  try {
+    json = await res.json();
+  } catch {
+    // non-JSON response
+  }
+  if (!res.ok) {
+    throw new Error(`${label} failed: HTTP ${res.status} ${(json && (json.message || json.error)) || ''}`.trim());
+  }
+  return json;
+}
+
+async function putObject(target, config, key, buffer, mimeType, fileName) {
+  const c = config.creds;
+
   if (target.kind === 'oss') {
     const result = await target.client.put(key, buffer, { mime: mimeType });
-    return { etag: result.etag };
+    return { url: null, etag: result.etag };
   }
-  const c = config.tencent;
-  const data = await new Promise((resolve, reject) => {
-    target.client.putObject(
-      { Bucket: c.bucket, Region: c.region, Key: key, Body: buffer, ContentType: mimeType },
-      (err, result) => {
-        if (err) {
-          reject(new Error(err.error || err.message || JSON.stringify(err)));
-        } else {
-          resolve(result);
+
+  if (target.kind === 'cos') {
+    const data = await new Promise((resolve, reject) => {
+      target.client.putObject(
+        { Bucket: c.bucket, Region: c.region, Key: key, Body: buffer, ContentType: mimeType },
+        (err, result) => {
+          if (err) {
+            reject(new Error(err.error || err.message || JSON.stringify(err)));
+          } else {
+            resolve(result);
+          }
         }
-      }
+      );
+    });
+    return { url: null, etag: data.ETag };
+  }
+
+  if (target.kind === 'smms') {
+    const form = new FormData();
+    form.append('smfile', new Blob([buffer], { type: mimeType }), fileName);
+    const headers = {};
+    if (c.token) headers.Authorization = c.token;
+    const json = await fetchJson('https://sm.ms/api/v2/upload', { method: 'POST', headers, body: form }, 'SM.MS upload');
+    // image_repeated still returns the existing URL
+    if (json && json.data && json.data.url) {
+      return { url: json.data.url, deleteUrl: json.data.delete };
+    }
+    throw new Error(`SM.MS upload failed: ${(json && json.message) || 'unknown error'}`);
+  }
+
+  if (target.kind === 'github') {
+    const api = `https://api.github.com/repos/${c.owner}/${c.repo}/contents/${encodeURI(key)}`;
+    const json = await fetchJson(
+      api,
+      {
+        method: 'PUT',
+        headers: {
+          Authorization: `Bearer ${c.token}`,
+          Accept: 'application/vnd.github+json',
+          'Content-Type': 'application/json',
+          'User-Agent': 'upload-cloud-skill',
+        },
+        body: JSON.stringify({ message: `upload ${key}`, content: buffer.toString('base64'), branch: c.branch }),
+      },
+      'GitHub API'
     );
-  });
-  return { etag: data.ETag };
+    return { url: json && json.content ? json.content.download_url : null };
+  }
+
+  if (target.kind === 'qiniu') {
+    const deadline = Math.floor(Date.now() / 1000) + 3600;
+    const scope = `${c.bucket}:${key}`;
+    const encodedPolicy = Buffer.from(JSON.stringify({ scope, deadline })).toString('base64url');
+    const encodedSign = crypto.createHmac('sha1', c.secret_key).update(encodedPolicy).digest('base64url');
+    const uploadToken = `${c.access_key}:${encodedSign}:${encodedPolicy}`;
+    const form = new FormData();
+    form.append('token', uploadToken);
+    form.append('key', key);
+    form.append('file', new Blob([buffer], { type: mimeType }), fileName);
+    const json = await fetchJson('https://upload.qiniup.com', { method: 'POST', body: form }, 'Qiniu upload');
+    if (json && json.error) {
+      throw new Error(`Qiniu upload failed: ${json.error}`);
+    }
+    return { url: `${c.domain.replace(/\/+$/, '')}/${key}` };
+  }
+
+  if (target.kind === 'imgur') {
+    const form = new FormData();
+    form.append('image', new Blob([buffer], { type: mimeType }), fileName);
+    const json = await fetchJson(
+      'https://api.imgur.com/3/upload',
+      { method: 'POST', headers: { Authorization: `Client-ID ${c.client_id}` }, body: form },
+      'Imgur upload'
+    );
+    if (json && json.success && json.data && json.data.link) {
+      return { url: json.data.link };
+    }
+    throw new Error(`Imgur upload failed: ${(json && json.data && json.data.error) || 'unknown error'}`);
+  }
+
+  if (target.kind === 'upyun') {
+    const auth = Buffer.from(`${c.operator}:${c.password}`).toString('base64');
+    const res = await fetch(`https://v0.api.upyun.com/${c.bucket}/${key}`, {
+      method: 'PUT',
+      headers: { Authorization: `Basic ${auth}`, 'Content-Type': mimeType },
+      body: buffer,
+    });
+    if (!res.ok) {
+      throw new Error(`Upyun upload failed: HTTP ${res.status} ${(await res.text()).slice(0, 200)}`.trim());
+    }
+    return { url: `${c.domain.replace(/\/+$/, '')}/${key}` };
+  }
+
+  throw new Error(`Unknown provider: ${target.kind}`);
 }
 
 async function uploadOne(target, config, filePath, args) {
@@ -455,6 +653,7 @@ async function uploadOne(target, config, filePath, args) {
   }
 
   const key = args.key || generateKey(filePath, args.prefix != null ? args.prefix : config.prefix);
+  const fileName = path.basename(filePath);
   if (args.dryRun) {
     return {
       success: true,
@@ -468,13 +667,13 @@ async function uploadOne(target, config, filePath, args) {
       dryRun: true,
     };
   }
-  const result = await putObject(target, config, key, buffer, finalMime);
+  const result = await putObject(target, config, key, buffer, finalMime, fileName);
   return {
     success: true,
     provider: config.provider,
     file: filePath,
     key,
-    url: makePublicUrl(config, key),
+    url: result.url || makePublicUrl(config, key),
     etag: result.etag,
     originalSize: originalBuffer.length,
     size: buffer.length,
@@ -486,7 +685,7 @@ async function main() {
   const args = parseArgs(process.argv.slice(2));
   if (args.help) {
     console.log(
-      'Usage: upload.js --file <path> [--file <path> ...] [--provider aliyun|tencent] [--prefix <dir>] [--max-width <px>] [--max-height <px>] [--quality <0-100>] [--no-compress] [--max-size <KB>] [--key <name>] [--dry-run]'
+      'Usage: upload.js --file <path> [--file <path> ...] [--provider aliyun|tencent|smms|github|qiniu|imgur|upyun] [--prefix <dir>] [--max-width <px>] [--max-height <px>] [--quality <0-100>] [--no-compress] [--max-size <KB>] [--key <name>] [--dry-run]'
     );
     process.exit(0);
   }

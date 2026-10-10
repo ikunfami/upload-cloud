@@ -1,8 +1,10 @@
 # Copy this file to config.toml and fill in real values.
 # config.toml (with real credentials) is git-ignored.
+# Only the [skills.cloud.<provider>] table of the provider you use needs to be filled.
 [skills.cloud]
-provider = "aliyun"   # Default provider: "aliyun" or "tencent". Used when the user does not specify a target.
+provider = "aliyun"   # Default provider: aliyun | tencent | smms | github | qiniu | imgur | upyun
 
+# ---- Aliyun OSS ----
 [skills.cloud.aliyun]
 access_key_id = ""
 access_key_secret = ""
@@ -12,6 +14,7 @@ prefix = "uploads"
 public_url = ""
 default_quality = 80
 
+# ---- Tencent Cloud COS ----
 [skills.cloud.tencent]
 secret_id = ""
 secret_key = ""
@@ -19,4 +22,39 @@ bucket = "my-bucket-1234567890"
 region = "ap-guangzhou"
 prefix = "uploads"
 public_url = ""
+default_quality = 80
+
+# ---- SM.MS image host (token required; get one at https://sm.ms/home/apitoken) ----
+[skills.cloud.smms]
+token = ""
+
+# ---- GitHub (uploads into a repo via the contents API) ----
+[skills.cloud.github]
+token = ""            # https://github.com/settings/tokens (needs repo scope)
+owner = ""            # GitHub user or org name
+repo = ""             # repository name
+branch = "main"
+prefix = "uploads"
+public_url = ""       # Optional: e.g. a jsDelivr CDN URL https://cdn.jsdelivr.net/gh/owner/repo@branch
+
+# ---- Qiniu Cloud (domain is required: your bound CDN/test domain) ----
+[skills.cloud.qiniu]
+access_key = ""
+secret_key = ""
+bucket = ""
+domain = ""           # e.g. http://xxx.bkt.clouddn.com or https://img.example.com
+prefix = "uploads"
+default_quality = 80
+
+# ---- Imgur (register a client at https://api.imgur.com/oauth2/addclient) ----
+[skills.cloud.imgur]
+client_id = ""
+
+# ---- Upyun / 又拍云 (domain is required: your bound domain) ----
+[skills.cloud.upyun]
+bucket = ""
+operator = ""
+password = ""
+domain = ""           # e.g. https://xxx.b0.upaiyun.com or your CDN domain
+prefix = "uploads"
 default_quality = 80

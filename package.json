@@ -1,7 +1,7 @@
 {
   "name": "upload-cloud-helper",
-  "version": "1.0.0",
-  "description": "Helper script for uploading files to Aliyun OSS or Tencent Cloud COS",
+  "version": "1.1.0",
+  "description": "Helper script for uploading files to Aliyun OSS, Tencent COS, SM.MS, GitHub, Qiniu, Imgur or Upyun",
   "type": "module",
   "private": true,
   "bin": {

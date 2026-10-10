@@ -2,6 +2,7 @@
 import fs from 'node:fs/promises';
 import { readFileSync } from 'node:fs';
 import path from 'node:path';
+import crypto from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import mime from 'mime-types';
 import OSS from 'ali-oss';
@@ -20,12 +21,86 @@ const PROVIDER_ALIASES = {
   ali: 'aliyun',
   oss: 'aliyun',
   alibaba: 'aliyun',
+  阿里云: 'aliyun',
   tencent: 'tencent',
   tencentcloud: 'tencent',
   cos: 'tencent',
   qcloud: 'tencent',
-  阿里云: 'aliyun',
   腾讯云: 'tencent',
+  smms: 'smms',
+  'sm.ms': 'smms',
+  sm: 'smms',
+  github: 'github',
+  gh: 'github',
+  qiniu: 'qiniu',
+  qiniuyun: 'qiniu',
+  七牛: 'qiniu',
+  七牛云: 'qiniu',
+  imgur: 'imgur',
+  upyun: 'upyun',
+  又拍云: 'upyun',
+  又拍: 'upyun',
+};
+
+const PROVIDER_KEY_MAPS = {
+  aliyun: {
+    access_key_id: 'OSS_ACCESS_KEY_ID',
+    access_key_secret: 'OSS_ACCESS_KEY_SECRET',
+    bucket: 'OSS_BUCKET',
+    endpoint: 'OSS_ENDPOINT',
+    prefix: 'OSS_PREFIX',
+    public_url: 'OSS_PUBLIC_URL',
+    default_quality: 'OSS_DEFAULT_QUALITY',
+  },
+  tencent: {
+    secret_id: 'COS_SECRET_ID',
+    secret_key: 'COS_SECRET_KEY',
+    bucket: 'COS_BUCKET',
+    region: 'COS_REGION',
+    prefix: 'COS_PREFIX',
+    public_url: 'COS_PUBLIC_URL',
+    default_quality: 'COS_DEFAULT_QUALITY',
+  },
+  smms: {
+    token: 'SMMS_TOKEN',
+  },
+  github: {
+    token: 'GITHUB_TOKEN',
+    owner: 'GITHUB_OWNER',
+    repo: 'GITHUB_REPO',
+    branch: 'GITHUB_BRANCH',
+    prefix: 'GITHUB_PREFIX',
+    public_url: 'GITHUB_PUBLIC_URL',
+  },
+  qiniu: {
+    access_key: 'QINIU_ACCESS_KEY',
+    secret_key: 'QINIU_SECRET_KEY',
+    bucket: 'QINIU_BUCKET',
+    domain: 'QINIU_DOMAIN',
+    prefix: 'QINIU_PREFIX',
+    default_quality: 'QINIU_DEFAULT_QUALITY',
+  },
+  imgur: {
+    client_id: 'IMGUR_CLIENT_ID',
+  },
+  upyun: {
+    bucket: 'UPYUN_BUCKET',
+    operator: 'UPYUN_OPERATOR',
+    password: 'UPYUN_PASSWORD',
+    domain: 'UPYUN_DOMAIN',
+    prefix: 'UPYUN_PREFIX',
+    default_quality: 'UPYUN_DEFAULT_QUALITY',
+  },
+};
+
+const PROVIDER_REQUIRED = {
+  aliyun: ['access_key_id', 'access_key_secret', 'bucket', 'endpoint'],
+  tencent: ['secret_id', 'secret_key', 'bucket', 'region'],
+  smms: ['token'],
+  github: ['token', 'owner', 'repo'],
+  qiniu: ['access_key', 'secret_key', 'bucket', 'domain'],
+  imgur: ['client_id'],
+  upyun: ['bucket', 'operator', 'password', 'domain'],
 };
 
 function normalizeProvider(raw) {
@@ -65,35 +140,14 @@ function parseArgs(argv) {
   return args;
 }
 
-const PROVIDER_KEY_MAPS = {
-  aliyun: {
-    access_key_id: 'OSS_ACCESS_KEY_ID',
-    access_key_secret: 'OSS_ACCESS_KEY_SECRET',
-    bucket: 'OSS_BUCKET',
-    endpoint: 'OSS_ENDPOINT',
-    prefix: 'OSS_PREFIX',
-    public_url: 'OSS_PUBLIC_URL',
-    default_quality: 'OSS_DEFAULT_QUALITY',
-  },
-  tencent: {
-    secret_id: 'COS_SECRET_ID',
-    secret_key: 'COS_SECRET_KEY',
-    bucket: 'COS_BUCKET',
-    region: 'COS_REGION',
-    prefix: 'COS_PREFIX',
-    public_url: 'COS_PUBLIC_URL',
-    default_quality: 'COS_DEFAULT_QUALITY',
-  },
-};
-
 function readLocalConfig() {
-  const result = { provider: '', aliyun: {}, tencent: {} };
+  const result = { provider: '', providers: {} };
   try {
     const configPath = path.join(path.dirname(fileURLToPath(import.meta.url)), 'config.toml');
     const text = readFileSync(configPath, 'utf8');
-    let section = null; // 'cloud' | 'aliyun' | 'tencent'
+    let section = null; // 'cloud' | provider name
     for (const line of text.split('\n')) {
-      const sec = line.match(/^\s*\[skills\.cloud(?:\.(aliyun|tencent))?\]\s*$/);
+      const sec = line.match(/^\s*\[skills\.cloud(?:\.([A-Za-z0-9_.-]+))?\]\s*$/);
       if (sec) {
         section = sec[1] || 'cloud';
         continue;
@@ -102,9 +156,14 @@ function readLocalConfig() {
       if (!m || !section) continue;
       if (section === 'cloud' && m[1] === 'provider') {
         result.provider = m[2];
-      } else if (section === 'aliyun' || section === 'tencent') {
-        const envKey = PROVIDER_KEY_MAPS[section][m[1]];
-        if (envKey) result[section][envKey] = m[2];
+        continue;
+      }
+      const keyMap = PROVIDER_KEY_MAPS[section];
+      if (!keyMap) continue;
+      const envKey = keyMap[m[1]];
+      if (envKey) {
+        if (!result.providers[section]) result.providers[section] = {};
+        result.providers[section][envKey] = m[2];
       }
     }
   } catch {
@@ -122,66 +181,41 @@ function loadConfig(args) {
     'aliyun';
 
   const keyMap = PROVIDER_KEY_MAPS[provider];
-  const localProvider = local[provider] || {};
-  const env = (k) => process.env[k] || localProvider[k] || '';
+  const localProvider = local.providers[provider] || {};
+  const get = (configKey) => process.env[keyMap[configKey]] || localProvider[keyMap[configKey]] || '';
 
+  const missing = PROVIDER_REQUIRED[provider].filter((k) => !get(k));
+  if (missing.length) {
+    throw new Error(
+      `Missing ${provider} configuration: ${missing.join(', ')} (set env vars or a [skills.cloud.${provider}] table in config.toml next to upload.js, or pass --provider <another>)`
+    );
+  }
+
+  const creds = {};
+  for (const configKey of Object.keys(keyMap)) {
+    creds[configKey] = get(configKey);
+  }
+  if (provider === 'github' && !creds.branch) {
+    creds.branch = 'main';
+  }
   if (provider === 'aliyun') {
-    const required = ['OSS_ACCESS_KEY_ID', 'OSS_ACCESS_KEY_SECRET', 'OSS_BUCKET', 'OSS_ENDPOINT'];
-    const missing = required.filter((k) => !env(k));
-    if (missing.length) {
-      throw new Error(
-        `Missing Aliyun OSS configuration: ${missing.join(', ')} (set env vars or a [skills.cloud.aliyun] table in config.toml next to upload.js, or pass --provider tencent)`
-      );
-    }
-  } else {
-    const required = ['COS_SECRET_ID', 'COS_SECRET_KEY', 'COS_BUCKET', 'COS_REGION'];
-    const missing = required.filter((k) => !env(k));
-    if (missing.length) {
-      throw new Error(
-        `Missing Tencent COS configuration: ${missing.join(', ')} (set env vars or a [skills.cloud.tencent] table in config.toml next to upload.js, or pass --provider aliyun)`
-      );
+    creds.secure = true;
+    if (creds.endpoint.startsWith('https://')) {
+      creds.endpoint = creds.endpoint.slice(8);
+    } else if (creds.endpoint.startsWith('http://')) {
+      creds.endpoint = creds.endpoint.slice(7);
+      creds.secure = false;
     }
   }
 
-  const shared = (k) => process.env[k] || localProvider[k] || '';
-  let endpoint = '';
-  let secure = true;
-  if (provider === 'aliyun') {
-    endpoint = env('OSS_ENDPOINT');
-    if (endpoint.startsWith('https://')) {
-      endpoint = endpoint.slice(8);
-    } else if (endpoint.startsWith('http://')) {
-      endpoint = endpoint.slice(7);
-      secure = false;
-    }
-  }
-
-  const rawQuality = shared(keyMap.default_quality);
+  const rawQuality = get('default_quality');
   const parsedQuality = rawQuality ? parseInt(rawQuality, 10) : NaN;
 
   return {
     provider,
-    aliyun:
-      provider === 'aliyun'
-        ? {
-            accessKeyId: env('OSS_ACCESS_KEY_ID'),
-            accessKeySecret: env('OSS_ACCESS_KEY_SECRET'),
-            bucket: env('OSS_BUCKET'),
-            endpoint,
-            secure,
-          }
-        : null,
-    tencent:
-      provider === 'tencent'
-        ? {
-            secretId: env('COS_SECRET_ID'),
-            secretKey: env('COS_SECRET_KEY'),
-            bucket: env('COS_BUCKET'),
-            region: env('COS_REGION'),
-          }
-        : null,
-    prefix: shared(keyMap.prefix),
-    publicUrl: shared(keyMap.public_url),
+    creds,
+    prefix: get('prefix'),
+    publicUrl: get('public_url'),
     defaultQuality: Number.isNaN(parsedQuality) ? 80 : parsedQuality,
   };
 }
@@ -200,13 +234,23 @@ function generateKey(filePath, prefix) {
 }
 
 function makePublicUrl(config, key) {
+  const c = config.creds;
   const base = config.publicUrl ? config.publicUrl.replace(/\/+$/, '') : null;
-  if (config.provider === 'aliyun') {
-    const c = config.aliyun;
-    return base ? `${base}/${key}` : `https://${c.bucket}.${c.endpoint}/${key}`;
+  switch (config.provider) {
+    case 'aliyun':
+      return base ? `${base}/${key}` : `https://${c.bucket}.${c.endpoint}/${key}`;
+    case 'tencent':
+      return base ? `${base}/${key}` : `https://${c.bucket}.cos.${c.region}.myqcloud.com/${key}`;
+    case 'github':
+      // Without a public_url the raw URL is only known after the API responds
+      return base ? `${base}/${key}` : null;
+    case 'qiniu':
+    case 'upyun':
+      return c.domain ? `${c.domain.replace(/\/+$/, '')}/${key}` : null;
+    default:
+      // smms / imgur: the URL is allocated by the service at upload time
+      return null;
   }
-  const c = config.tencent;
-  return base ? `${base}/${key}` : `https://${c.bucket}.cos.${c.region}.myqcloud.com/${key}`;
 }
 
 async function renderImage(image, mimeType, quality) {
@@ -258,50 +302,150 @@ async function compressImage(filePath, options) {
 
 function createClient(config) {
   if (config.provider === 'aliyun') {
-    const c = config.aliyun;
+    const c = config.creds;
     return {
       kind: 'oss',
       client: new OSS({
         endpoint: c.endpoint,
-        accessKeyId: c.accessKeyId,
-        accessKeySecret: c.accessKeySecret,
+        accessKeyId: c.access_key_id,
+        accessKeySecret: c.access_key_secret,
         bucket: c.bucket,
         secure: c.secure,
         timeout: 120000,
       }),
     };
   }
-  const c = config.tencent;
-  return {
-    kind: 'cos',
-    client: new COS({
-      SecretId: c.secretId,
-      SecretKey: c.secretKey,
-      FileParallelLimit: 3,
-      Timeout: 120000,
-    }),
-  };
+  if (config.provider === 'tencent') {
+    const c = config.creds;
+    return {
+      kind: 'cos',
+      client: new COS({
+        SecretId: c.secret_id,
+        SecretKey: c.secret_key,
+        FileParallelLimit: 3,
+        Timeout: 120000,
+      }),
+    };
+  }
+  // smms / github / qiniu / imgur / upyun: plain fetch, no SDK client needed
+  return { kind: config.provider };
 }
 
-async function putObject(target, config, key, buffer, mimeType) {
+async function fetchJson(url, options, label) {
+  const res = await fetch(url, options);
+  let json = null;
+  try {
+    json = await res.json();
+  } catch {
+    // non-JSON response
+  }
+  if (!res.ok) {
+    throw new Error(`${label} failed: HTTP ${res.status} ${(json && (json.message || json.error)) || ''}`.trim());
+  }
+  return json;
+}
+
+async function putObject(target, config, key, buffer, mimeType, fileName) {
+  const c = config.creds;
+
   if (target.kind === 'oss') {
     const result = await target.client.put(key, buffer, { mime: mimeType });
-    return { etag: result.etag };
+    return { url: null, etag: result.etag };
   }
-  const c = config.tencent;
-  const data = await new Promise((resolve, reject) => {
-    target.client.putObject(
-      { Bucket: c.bucket, Region: c.region, Key: key, Body: buffer, ContentType: mimeType },
-      (err, result) => {
-        if (err) {
-          reject(new Error(err.error || err.message || JSON.stringify(err)));
-        } else {
-          resolve(result);
+
+  if (target.kind === 'cos') {
+    const data = await new Promise((resolve, reject) => {
+      target.client.putObject(
+        { Bucket: c.bucket, Region: c.region, Key: key, Body: buffer, ContentType: mimeType },
+        (err, result) => {
+          if (err) {
+            reject(new Error(err.error || err.message || JSON.stringify(err)));
+          } else {
+            resolve(result);
+          }
         }
-      }
+      );
+    });
+    return { url: null, etag: data.ETag };
+  }
+
+  if (target.kind === 'smms') {
+    const form = new FormData();
+    form.append('smfile', new Blob([buffer], { type: mimeType }), fileName);
+    const headers = {};
+    if (c.token) headers.Authorization = c.token;
+    const json = await fetchJson('https://sm.ms/api/v2/upload', { method: 'POST', headers, body: form }, 'SM.MS upload');
+    // image_repeated still returns the existing URL
+    if (json && json.data && json.data.url) {
+      return { url: json.data.url, deleteUrl: json.data.delete };
+    }
+    throw new Error(`SM.MS upload failed: ${(json && json.message) || 'unknown error'}`);
+  }
+
+  if (target.kind === 'github') {
+    const api = `https://api.github.com/repos/${c.owner}/${c.repo}/contents/${encodeURI(key)}`;
+    const json = await fetchJson(
+      api,
+      {
+        method: 'PUT',
+        headers: {
+          Authorization: `Bearer ${c.token}`,
+          Accept: 'application/vnd.github+json',
+          'Content-Type': 'application/json',
+          'User-Agent': 'upload-cloud-skill',
+        },
+        body: JSON.stringify({ message: `upload ${key}`, content: buffer.toString('base64'), branch: c.branch }),
+      },
+      'GitHub API'
     );
-  });
-  return { etag: data.ETag };
+    return { url: json && json.content ? json.content.download_url : null };
+  }
+
+  if (target.kind === 'qiniu') {
+    const deadline = Math.floor(Date.now() / 1000) + 3600;
+    const scope = `${c.bucket}:${key}`;
+    const encodedPolicy = Buffer.from(JSON.stringify({ scope, deadline })).toString('base64url');
+    const encodedSign = crypto.createHmac('sha1', c.secret_key).update(encodedPolicy).digest('base64url');
+    const uploadToken = `${c.access_key}:${encodedSign}:${encodedPolicy}`;
+    const form = new FormData();
+    form.append('token', uploadToken);
+    form.append('key', key);
+    form.append('file', new Blob([buffer], { type: mimeType }), fileName);
+    const json = await fetchJson('https://upload.qiniup.com', { method: 'POST', body: form }, 'Qiniu upload');
+    if (json && json.error) {
+      throw new Error(`Qiniu upload failed: ${json.error}`);
+    }
+    return { url: `${c.domain.replace(/\/+$/, '')}/${key}` };
+  }
+
+  if (target.kind === 'imgur') {
+    const form = new FormData();
+    form.append('image', new Blob([buffer], { type: mimeType }), fileName);
+    const json = await fetchJson(
+      'https://api.imgur.com/3/upload',
+      { method: 'POST', headers: { Authorization: `Client-ID ${c.client_id}` }, body: form },
+      'Imgur upload'
+    );
+    if (json && json.success && json.data && json.data.link) {
+      return { url: json.data.link };
+    }
+    throw new Error(`Imgur upload failed: ${(json && json.data && json.data.error) || 'unknown error'}`);
+  }
+
+  if (target.kind === 'upyun') {
+    const auth = Buffer.from(`${c.operator}:${c.password}`).toString('base64');
+    const res = await fetch(`https://v0.api.upyun.com/${c.bucket}/${key}`, {
+      method: 'PUT',
+      headers: { Authorization: `Basic ${auth}`, 'Content-Type': mimeType },
+      body: buffer,
+    });
+    if (!res.ok) {
+      throw new Error(`Upyun upload failed: HTTP ${res.status} ${(await res.text()).slice(0, 200)}`.trim());
+    }
+    return { url: `${c.domain.replace(/\/+$/, '')}/${key}` };
+  }
+
+  throw new Error(`Unknown provider: ${target.kind}`);
 }
 
 async function uploadOne(target, config, filePath, args) {
@@ -337,6 +481,7 @@ async function uploadOne(target, config, filePath, args) {
   }
 
   const key = args.key || generateKey(filePath, args.prefix != null ? args.prefix : config.prefix);
+  const fileName = path.basename(filePath);
   if (args.dryRun) {
     return {
       success: true,
@@ -350,13 +495,13 @@ async function uploadOne(target, config, filePath, args) {
       dryRun: true,
     };
   }
-  const result = await putObject(target, config, key, buffer, finalMime);
+  const result = await putObject(target, config, key, buffer, finalMime, fileName);
   return {
     success: true,
     provider: config.provider,
     file: filePath,
     key,
-    url: makePublicUrl(config, key),
+    url: result.url || makePublicUrl(config, key),
     etag: result.etag,
     originalSize: originalBuffer.length,
     size: buffer.length,
@@ -368,7 +513,7 @@ async function main() {
   const args = parseArgs(process.argv.slice(2));
   if (args.help) {
     console.log(
-      'Usage: upload.js --file <path> [--file <path> ...] [--provider aliyun|tencent] [--prefix <dir>] [--max-width <px>] [--max-height <px>] [--quality <0-100>] [--no-compress] [--max-size <KB>] [--key <name>] [--dry-run]'
+      'Usage: upload.js --file <path> [--file <path> ...] [--provider aliyun|tencent|smms|github|qiniu|imgur|upyun] [--prefix <dir>] [--max-width <px>] [--max-height <px>] [--quality <0-100>] [--no-compress] [--max-size <KB>] [--key <name>] [--dry-run]'
     );
     process.exit(0);
   }
