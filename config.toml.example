@@ -1,0 +1,22 @@
+# Copy this file to config.toml and fill in real values.
+# config.toml (with real credentials) is git-ignored.
+[skills.cloud]
+provider = "aliyun"   # Default provider: "aliyun" or "tencent". Used when the user does not specify a target.
+
+[skills.cloud.aliyun]
+access_key_id = ""
+access_key_secret = ""
+bucket = ""
+endpoint = "oss-cn-hangzhou.aliyuncs.com"
+prefix = "uploads"
+public_url = ""
+default_quality = 80
+
+[skills.cloud.tencent]
+secret_id = ""
+secret_key = ""
+bucket = "my-bucket-1234567890"
+region = "ap-guangzhou"
+prefix = "uploads"
+public_url = ""
+default_quality = 80

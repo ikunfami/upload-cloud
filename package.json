@@ -1,0 +1,16 @@
+{
+  "name": "upload-cloud-helper",
+  "version": "1.0.0",
+  "description": "Helper script for uploading files to Aliyun OSS or Tencent Cloud COS",
+  "type": "module",
+  "private": true,
+  "bin": {
+    "upload-cloud": "./upload.js"
+  },
+  "dependencies": {
+    "ali-oss": "^6.22.0",
+    "cos-nodejs-sdk-v5": "^2.14.0",
+    "jimp": "^0.22.12",
+    "mime-types": "^2.1.35"
+  }
+}
