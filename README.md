@@ -168,6 +168,19 @@ node upload.js --file <path> [--file <path> ...]
 
 `--dry-run` 不记录日志；日志写入失败不影响上传结果和退出码。
 
+## 去重
+
+在 `config.toml` 的 `[skills.cloud]` 表中开启：
+
+```toml
+[skills.cloud]
+dedup = true   # 默认 false；也可用环境变量 CLOUD_DEDUP=true
+```
+
+- 开启后，上传前会按**本地文件路径**在所有历史日志文件中查找成功记录；找到则跳过上传，直接返回已有的 URL（结果中带 `"deduped": true` 和 `firstUploadedAt`）
+- 路径按解析后的绝对路径匹配（Windows 下不区分大小写）；只匹配成功记录，失败记录不会阻止重试
+- 去重命中不会重复写入日志；未开启时直接上传，不做任何查找
+
 ## 作为 Agent Skill 使用
 
 本仓库同时是 [Agent Skills](https://github.com/anthropics/skills) 格式的技能。将整个目录复制到 Agent 的技能目录，例如：

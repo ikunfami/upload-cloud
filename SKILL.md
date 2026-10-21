@@ -42,6 +42,7 @@ Configuration is read from (in priority order — environment variables win):
 ```toml
 [skills.cloud]
 provider = "aliyun"   # Default provider when the user does not specify one
+dedup = false         # true = skip re-uploading a file whose local path already has a successful record in the upload logs
 
 [skills.cloud.aliyun]
 access_key_id = "LTAI..."
@@ -94,7 +95,7 @@ default_quality = 80
 
 Only the table for the chosen provider needs to be filled. If that table does not exist or any required field is empty, prompt the user to fill in real credentials first (and tell them where to get them — see the per-provider links above). Never commit `config.toml` with real credentials.
 
-Environment variable names follow the config keys: `OSS_ACCESS_KEY_ID`, `COS_SECRET_ID`, `SMMS_TOKEN`, `GITHUB_TOKEN` / `GITHUB_OWNER` / `GITHUB_REPO` / `GITHUB_BRANCH`, `QINIU_ACCESS_KEY` / `QINIU_DOMAIN`, `IMGUR_CLIENT_ID`, `UPYUN_BUCKET` / `UPYUN_OPERATOR` / `UPYUN_PASSWORD` / `UPYUN_DOMAIN`, etc.
+Environment variable names follow the config keys: `CLOUD_PROVIDER`, `CLOUD_DEDUP` (`true` / `false`), `OSS_ACCESS_KEY_ID`, `COS_SECRET_ID`, `SMMS_TOKEN`, `GITHUB_TOKEN` / `GITHUB_OWNER` / `GITHUB_REPO` / `GITHUB_BRANCH`, `QINIU_ACCESS_KEY` / `QINIU_DOMAIN`, `IMGUR_CLIENT_ID`, `UPYUN_BUCKET` / `UPYUN_OPERATOR` / `UPYUN_PASSWORD` / `UPYUN_DOMAIN`, etc.
 
 ## Workflow
 1. **Determine the provider** from the user's request using the alias table; if unspecified, use the `provider` default from the config.
@@ -114,7 +115,7 @@ Environment variable names follow the config keys: `OSS_ACCESS_KEY_ID`, `COS_SEC
      [--max-size 500] \
      [--dry-run]
    ```
-5. **Return the result**: parse the JSON the script prints and report the upload URL of each file to the user (each result includes a `provider` field); if any file fails, report the specific error.
+5. **Return the result**: parse the JSON the script prints and report the upload URL of each file to the user (each result includes a `provider` field); if any file fails, report the specific error. When dedup is on and a file was already uploaded, the result has `"deduped": true` — report the existing URL and note that no re-upload happened.
 
 ## Image Compression Rules (same strategy as upload-oss / upload-cos)
 - **Compress by default**: when uploading an image, if `--quality` is not explicitly given, automatically compress using `default_quality` from the config (default 80). Pass `--no-compress` to skip compression and upload the original.
@@ -161,6 +162,11 @@ Environment variable names follow the config keys: `OSS_ACCESS_KEY_ID`, `COS_SEC
 
 - Each record contains: `time` (ISO), `localPath` (local file path), `url` (returned public URL, `null` in `error`), `key` (object key), `provider`, `size` (uploaded bytes), `originalSize` (local file bytes), `type` (MIME type), and `error` (only in `error` entries).
 - `--dry-run` uploads are not logged. A log-write failure does not affect the upload result or exit code.
+
+## Deduplication
+- When `dedup = true` in the `[skills.cloud]` table (or `CLOUD_DEDUP=true`), the script searches all daily log files before uploading: if the **local file path** already has a successful record, the upload is skipped and the existing URL is returned instead (the result carries `"deduped": true` and `firstUploadedAt`).
+- Matching is by resolved local path (case-insensitive on Windows) and success entries only; failed uploads never block a retry. Deduped hits are not written to the log again.
+- When `dedup` is disabled (default), files are uploaded directly without any log lookup.
 
 ## Notes
 - **Any file**: non-image files are uploaded as-is, ignoring `--max-width` / `--max-height` / `--quality` / `--max-size`.- **Compress by default**: images are compressed with `default_quality` (default 80) unless `--no-compress` is passed.
@@ -337,7 +343,7 @@ function parseArgs(argv) {
 }
 
 function readLocalConfig() {
-  const result = { provider: '', providers: {} };
+  const result = { provider: '', dedup: false, providers: {} };
   try {
     const configPath = path.join(path.dirname(fileURLToPath(import.meta.url)), 'config.toml');
     const text = readFileSync(configPath, 'utf8');
@@ -348,10 +354,12 @@ function readLocalConfig() {
         section = sec[1] || 'cloud';
         continue;
       }
-      const m = line.match(/^\s*([A-Za-z0-9_]+)\s*=\s*"(.*)"\s*$/);
+      const m = line.match(/^\s*([A-Za-z0-9_]+)\s*=\s*(?:"([^"]*)"|(true|false))\s*$/i);
       if (!m || !section) continue;
-      if (section === 'cloud' && m[1] === 'provider') {
-        result.provider = m[2];
+      const value = m[2] !== undefined ? m[2] : m[3].toLowerCase();
+      if (section === 'cloud') {
+        if (m[1] === 'provider') result.provider = value;
+        else if (m[1] === 'dedup') result.dedup = value === 'true';
         continue;
       }
       const keyMap = PROVIDER_KEY_MAPS[section];
@@ -359,7 +367,7 @@ function readLocalConfig() {
       const envKey = keyMap[m[1]];
       if (envKey) {
         if (!result.providers[section]) result.providers[section] = {};
-        result.providers[section][envKey] = m[2];
+        result.providers[section][envKey] = value;
       }
     }
   } catch {
@@ -407,12 +415,15 @@ function loadConfig(args) {
   const rawQuality = get('default_quality');
   const parsedQuality = rawQuality ? parseInt(rawQuality, 10) : NaN;
 
+  const envDedup = (process.env.CLOUD_DEDUP || '').toLowerCase();
+
   return {
     provider,
     creds,
     prefix: get('prefix'),
     publicUrl: get('public_url'),
     defaultQuality: Number.isNaN(parsedQuality) ? 80 : parsedQuality,
+    dedup: envDedup ? envDedup === 'true' : local.dedup === true,
   };
 }
 
@@ -713,6 +724,51 @@ function getLogDir() {
   return path.join(process.env.XDG_CONFIG_HOME || path.join(os.homedir(), '.config'), 'upload-cloud');
 }
 
+function* iterLogEntries(parsed) {
+  if (Array.isArray(parsed)) {
+    yield* parsed; // v0 flat-array format
+    return;
+  }
+  if (!parsed || typeof parsed !== 'object') return;
+  for (const cat of ['success', 'error']) {
+    const bucket = parsed[cat];
+    if (Array.isArray(bucket)) yield* bucket; // v1: bare array
+    else if (bucket && Array.isArray(bucket.list)) yield* bucket.list; // v2: { total, list }
+  }
+}
+
+async function findUploadedByPath(filePath) {
+  const dir = getLogDir();
+  let files = [];
+  try {
+    files = (await fs.readdir(dir))
+      .filter((f) => /^\d{4}-\d{2}-\d{2}-upload-log\.json$/.test(f))
+      .sort()
+      .reverse(); // newest day first
+  } catch {
+    return null; // no log dir yet
+  }
+  const norm = (p) => {
+    const s = String(p).replace(/\\/g, '/');
+    return process.platform === 'win32' ? s.toLowerCase() : s;
+  };
+  const target = norm(path.resolve(filePath));
+  for (const f of files) {
+    let parsed = null;
+    try {
+      parsed = JSON.parse(await fs.readFile(path.join(dir, f), 'utf8'));
+    } catch {
+      continue; // skip unreadable log file
+    }
+    for (const entry of iterLogEntries(parsed)) {
+      if (entry && entry.url && norm(entry.localPath) === target) {
+        return entry;
+      }
+    }
+  }
+  return null;
+}
+
 function formatLocalDate(d) {
   const pad = (n) => String(n).padStart(2, '0');
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
@@ -794,13 +850,32 @@ async function main() {
   const results = [];
   for (const file of args.files) {
     try {
+      if (config.dedup && !args.dryRun) {
+        const hit = await findUploadedByPath(file);
+        if (hit) {
+          console.error(`Already uploaded (dedup, skipped): ${file} -> ${hit.url}`);
+          results.push({
+            success: true,
+            provider: config.provider,
+            file,
+            key: hit.key || null,
+            url: hit.url,
+            size: typeof hit.size === 'number' ? hit.size : null,
+            originalSize: typeof hit.originalSize === 'number' ? hit.originalSize : null,
+            mime: hit.type || null,
+            deduped: true,
+            firstUploadedAt: hit.time || null,
+          });
+          continue;
+        }
+      }
       results.push(await uploadOne(target, config, file, args));
     } catch (err) {
       results.push({ success: false, provider: config.provider, file, error: err.message });
     }
   }
   console.log(JSON.stringify(results, null, 2));
-  const logResults = results.filter((r) => !r.dryRun);
+  const logResults = results.filter((r) => !r.dryRun && !r.deduped);
   if (logResults.length) {
     try {
       const logPath = await writeUploadLog(logResults);

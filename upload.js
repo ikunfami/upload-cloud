@@ -142,7 +142,7 @@ function parseArgs(argv) {
 }
 
 function readLocalConfig() {
-  const result = { provider: '', providers: {} };
+  const result = { provider: '', dedup: false, providers: {} };
   try {
     const configPath = path.join(path.dirname(fileURLToPath(import.meta.url)), 'config.toml');
     const text = readFileSync(configPath, 'utf8');
@@ -153,10 +153,12 @@ function readLocalConfig() {
         section = sec[1] || 'cloud';
         continue;
       }
-      const m = line.match(/^\s*([A-Za-z0-9_]+)\s*=\s*"(.*)"\s*$/);
+      const m = line.match(/^\s*([A-Za-z0-9_]+)\s*=\s*(?:"([^"]*)"|(true|false))\s*$/i);
       if (!m || !section) continue;
-      if (section === 'cloud' && m[1] === 'provider') {
-        result.provider = m[2];
+      const value = m[2] !== undefined ? m[2] : m[3].toLowerCase();
+      if (section === 'cloud') {
+        if (m[1] === 'provider') result.provider = value;
+        else if (m[1] === 'dedup') result.dedup = value === 'true';
         continue;
       }
       const keyMap = PROVIDER_KEY_MAPS[section];
@@ -164,7 +166,7 @@ function readLocalConfig() {
       const envKey = keyMap[m[1]];
       if (envKey) {
         if (!result.providers[section]) result.providers[section] = {};
-        result.providers[section][envKey] = m[2];
+        result.providers[section][envKey] = value;
       }
     }
   } catch {
@@ -212,12 +214,15 @@ function loadConfig(args) {
   const rawQuality = get('default_quality');
   const parsedQuality = rawQuality ? parseInt(rawQuality, 10) : NaN;
 
+  const envDedup = (process.env.CLOUD_DEDUP || '').toLowerCase();
+
   return {
     provider,
     creds,
     prefix: get('prefix'),
     publicUrl: get('public_url'),
     defaultQuality: Number.isNaN(parsedQuality) ? 80 : parsedQuality,
+    dedup: envDedup ? envDedup === 'true' : local.dedup === true,
   };
 }
 
@@ -518,6 +523,51 @@ function getLogDir() {
   return path.join(process.env.XDG_CONFIG_HOME || path.join(os.homedir(), '.config'), 'upload-cloud');
 }
 
+function* iterLogEntries(parsed) {
+  if (Array.isArray(parsed)) {
+    yield* parsed; // v0 flat-array format
+    return;
+  }
+  if (!parsed || typeof parsed !== 'object') return;
+  for (const cat of ['success', 'error']) {
+    const bucket = parsed[cat];
+    if (Array.isArray(bucket)) yield* bucket; // v1: bare array
+    else if (bucket && Array.isArray(bucket.list)) yield* bucket.list; // v2: { total, list }
+  }
+}
+
+async function findUploadedByPath(filePath) {
+  const dir = getLogDir();
+  let files = [];
+  try {
+    files = (await fs.readdir(dir))
+      .filter((f) => /^\d{4}-\d{2}-\d{2}-upload-log\.json$/.test(f))
+      .sort()
+      .reverse(); // newest day first
+  } catch {
+    return null; // no log dir yet
+  }
+  const norm = (p) => {
+    const s = String(p).replace(/\\/g, '/');
+    return process.platform === 'win32' ? s.toLowerCase() : s;
+  };
+  const target = norm(path.resolve(filePath));
+  for (const f of files) {
+    let parsed = null;
+    try {
+      parsed = JSON.parse(await fs.readFile(path.join(dir, f), 'utf8'));
+    } catch {
+      continue; // skip unreadable log file
+    }
+    for (const entry of iterLogEntries(parsed)) {
+      if (entry && entry.url && norm(entry.localPath) === target) {
+        return entry;
+      }
+    }
+  }
+  return null;
+}
+
 function formatLocalDate(d) {
   const pad = (n) => String(n).padStart(2, '0');
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
@@ -599,13 +649,32 @@ async function main() {
   const results = [];
   for (const file of args.files) {
     try {
+      if (config.dedup && !args.dryRun) {
+        const hit = await findUploadedByPath(file);
+        if (hit) {
+          console.error(`Already uploaded (dedup, skipped): ${file} -> ${hit.url}`);
+          results.push({
+            success: true,
+            provider: config.provider,
+            file,
+            key: hit.key || null,
+            url: hit.url,
+            size: typeof hit.size === 'number' ? hit.size : null,
+            originalSize: typeof hit.originalSize === 'number' ? hit.originalSize : null,
+            mime: hit.type || null,
+            deduped: true,
+            firstUploadedAt: hit.time || null,
+          });
+          continue;
+        }
+      }
       results.push(await uploadOne(target, config, file, args));
     } catch (err) {
       results.push({ success: false, provider: config.provider, file, error: err.message });
     }
   }
   console.log(JSON.stringify(results, null, 2));
-  const logResults = results.filter((r) => !r.dryRun);
+  const logResults = results.filter((r) => !r.dryRun && !r.deduped);
   if (logResults.length) {
     try {
       const logPath = await writeUploadLog(logResults);

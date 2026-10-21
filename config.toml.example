@@ -3,6 +3,7 @@
 # Only the [skills.cloud.<provider>] table of the provider you use needs to be filled.
 [skills.cloud]
 provider = "aliyun"   # Default provider: aliyun | tencent | smms | github | qiniu | imgur | upyun
+dedup = false         # true = skip re-upload when the file's local path already exists in the upload logs (matched against successful records)
 
 # ---- Aliyun OSS ----
 [skills.cloud.aliyun]
