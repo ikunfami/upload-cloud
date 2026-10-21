@@ -143,6 +143,31 @@ node upload.js --file <path> [--file <path> ...]
 - **保持原格式**：JPEG 仍是 JPEG，PNG 仍是 PNG，不强制转格式
 - **兜底**：压缩结果 ≥ 原图大小时自动回退上传原图，压缩失败也不影响上传
 
+## 上传日志
+
+每次真实上传（成功或失败）都会追加记录到当天的日志文件：
+
+- **Windows**：`%APPDATA%\upload-cloud\YYYY-MM-DD-upload-log.json`（如 `C:\Users\xxx\AppData\Roaming\upload-cloud\2026-10-21-upload-log.json`）
+- **其他系统**：`~/.config/upload-cloud/YYYY-MM-DD-upload-log.json`
+- 目录不存在时自动创建；同一天多次上传追加到同一个文件
+- 文件结构为 `{ "success": [...], "error": [...] }`，记录按成功/失败分别归入两个数组
+
+每条记录字段：
+
+| 字段 | 说明 |
+|---|---|
+| `time` | 记录时间（ISO 格式） |
+| `localPath` | 本地文件路径 |
+| `url` | 上传后返回的公共 URL（`error` 分类中为 `null`） |
+| `key` | 云端对象 key |
+| `provider` | 使用的服务商 |
+| `size` | 实际上传字节数（压缩后） |
+| `originalSize` | 本地文件原始字节数 |
+| `type` | 文件 MIME 类型 |
+| `error` | 仅 `error` 分类中存在，错误信息 |
+
+`--dry-run` 不记录日志；日志写入失败不影响上传结果和退出码。
+
 ## 作为 Agent Skill 使用
 
 本仓库同时是 [Agent Skills](https://github.com/anthropics/skills) 格式的技能。将整个目录复制到 Agent 的技能目录，例如：

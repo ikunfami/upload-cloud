@@ -138,9 +138,26 @@ Environment variable names follow the config keys: `OSS_ACCESS_KEY_ID`, `COS_SEC
 - **Upyun**: uses the REST API with Basic auth (operator + password); `domain` is required.
 - All HTTP-based providers (SM.MS / GitHub / Qiniu / Imgur / Upyun) use Node's built-in `fetch` — no extra npm dependencies.
 
+## Upload Log
+- Every real upload (success or failure) is appended to a daily log file: `%APPDATA%\upload-cloud\YYYY-MM-DD-upload-log.json` on Windows (`~/.config/upload-cloud/` elsewhere). The directory is created automatically if missing.
+- The log file is a JSON object with two arrays — records land in `success` or `error`:
+
+```json
+{
+  "success": [
+    { "time": "...", "localPath": "...", "url": "...", "key": "...", "provider": "...", "size": 12345, "originalSize": 23456, "type": "image/png" }
+  ],
+  "error": [
+    { "time": "...", "localPath": "...", "url": null, "key": null, "provider": "...", "size": null, "originalSize": 23456, "type": "image/png", "error": "..." }
+  ]
+}
+```
+
+- Each record contains: `time` (ISO), `localPath` (local file path), `url` (returned public URL, `null` in `error`), `key` (object key), `provider`, `size` (uploaded bytes), `originalSize` (local file bytes), `type` (MIME type), and `error` (only in `error` entries).
+- `--dry-run` uploads are not logged. A log-write failure does not affect the upload result or exit code.
+
 ## Notes
-- **Any file**: non-image files are uploaded as-is, ignoring `--max-width` / `--max-height` / `--quality` / `--max-size`.
-- **Compress by default**: images are compressed with `default_quality` (default 80) unless `--no-compress` is passed.
+- **Any file**: non-image files are uploaded as-is, ignoring `--max-width` / `--max-height` / `--quality` / `--max-size`.- **Compress by default**: images are compressed with `default_quality` (default 80) unless `--no-compress` is passed.
 - **Compression failure**: automatically falls back to the original image so the upload never breaks.
 - **Security**: never upload sensitive files such as `.env`, SSH private keys, or password files.
 - **Batch**: `--file` can be passed multiple times; any failure makes the script exit with a non-zero code.
@@ -172,8 +189,9 @@ Environment variable names follow the config keys: `OSS_ACCESS_KEY_ID`, `COS_SEC
 ```js
 #!/usr/bin/env node
 import fs from 'node:fs/promises';
-import { readFileSync } from 'node:fs';
+import { readFileSync, existsSync } from 'node:fs';
 import path from 'node:path';
+import os from 'node:os';
 import crypto from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import mime from 'mime-types';
@@ -268,7 +286,7 @@ const PROVIDER_KEY_MAPS = {
 const PROVIDER_REQUIRED = {
   aliyun: ['access_key_id', 'access_key_secret', 'bucket', 'endpoint'],
   tencent: ['secret_id', 'secret_key', 'bucket', 'region'],
-  smms: [],
+  smms: ['token'],
   github: ['token', 'owner', 'repo'],
   qiniu: ['access_key', 'secret_key', 'bucket', 'domain'],
   imgur: ['client_id'],
@@ -681,6 +699,69 @@ async function uploadOne(target, config, filePath, args) {
   };
 }
 
+function getLogDir() {
+  if (process.platform === 'win32') {
+    const appData = process.env.APPDATA || path.join(os.homedir(), 'AppData', 'Roaming');
+    return path.join(appData, 'upload-cloud');
+  }
+  return path.join(process.env.XDG_CONFIG_HOME || path.join(os.homedir(), '.config'), 'upload-cloud');
+}
+
+function formatLocalDate(d) {
+  const pad = (n) => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+}
+
+async function writeUploadLog(results) {
+  const dir = getLogDir();
+  await fs.mkdir(dir, { recursive: true });
+  const logPath = path.join(dir, `${formatLocalDate(new Date())}-upload-log.json`);
+
+  let log = { success: [], error: [] };
+  if (existsSync(logPath)) {
+    try {
+      const parsed = JSON.parse(await fs.readFile(logPath, 'utf8'));
+      if (Array.isArray(parsed)) {
+        // migrate old flat-array format
+        for (const r of parsed) {
+          (r && r.status === 'failed' ? log.error : log.success).push(r);
+        }
+      } else if (parsed && typeof parsed === 'object') {
+        if (Array.isArray(parsed.success)) log.success = parsed.success;
+        if (Array.isArray(parsed.error)) log.error = parsed.error;
+      }
+    } catch {
+      // corrupted log file: start fresh
+    }
+  }
+
+  const now = new Date();
+  for (const r of results) {
+    const entry = {
+      time: now.toISOString(),
+      localPath: r.file,
+      url: r.success ? r.url || null : null,
+      key: r.key || null,
+      provider: r.provider,
+      size: typeof r.size === 'number' ? r.size : null,
+      originalSize: typeof r.originalSize === 'number' ? r.originalSize : null,
+      type: r.mime || mime.lookup(r.file) || 'application/octet-stream',
+    };
+    if (!r.success) {
+      entry.error = r.error || 'unknown error';
+      try {
+        entry.originalSize = (await fs.stat(r.file)).size;
+      } catch {
+        // file unreadable: keep null
+      }
+    }
+    (r.success ? log.success : log.error).push(entry);
+  }
+
+  await fs.writeFile(logPath, JSON.stringify(log, null, 2), 'utf8');
+  return logPath;
+}
+
 async function main() {
   const args = parseArgs(process.argv.slice(2));
   if (args.help) {
@@ -703,6 +784,15 @@ async function main() {
     }
   }
   console.log(JSON.stringify(results, null, 2));
+  const logResults = results.filter((r) => !r.dryRun);
+  if (logResults.length) {
+    try {
+      const logPath = await writeUploadLog(logResults);
+      console.error(`Upload log written to ${logPath}`);
+    } catch (err) {
+      console.error(`Failed to write upload log: ${err.message}`);
+    }
+  }
   const failed = results.filter((r) => !r.success);
   process.exit(failed.length ? 1 : 0);
 }
