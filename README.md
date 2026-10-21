@@ -168,6 +168,8 @@ node upload.js --file <path> [--file <path> ...]
 
 `--dry-run` 不记录日志；日志写入失败不影响上传结果和退出码。
 
+**日志保留**：每次写入日志后，只保留最近 `log_keep_days` 天的日志文件（默认 **7** 个），超出部分自动从最旧日期开始删除。可在 `config.toml` 的 `[skills.cloud]` 段配置（或环境变量 `CLOUD_LOG_KEEP_DAYS`）。
+
 ## 去重
 
 在 `config.toml` 的 `[skills.cloud]` 表中开启：

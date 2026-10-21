@@ -4,6 +4,7 @@
 [skills.cloud]
 provider = "aliyun"   # Default provider: aliyun | tencent | smms | github | qiniu | imgur | upyun
 dedup = false         # true = skip re-upload when the file's local path already exists in the upload logs (matched against successful records)
+log_keep_days = 7     # Keep only the most recent N daily log files; oldest beyond this are deleted on each upload
 
 # ---- Aliyun OSS ----
 [skills.cloud.aliyun]

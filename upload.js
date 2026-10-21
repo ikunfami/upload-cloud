@@ -153,12 +153,13 @@ function readLocalConfig() {
         section = sec[1] || 'cloud';
         continue;
       }
-      const m = line.match(/^\s*([A-Za-z0-9_]+)\s*=\s*(?:"([^"]*)"|(true|false))\s*$/i);
+      const m = line.match(/^\s*([A-Za-z0-9_]+)\s*=\s*(?:"([^"]*)"|(true|false)|(\d+))\s*$/i);
       if (!m || !section) continue;
-      const value = m[2] !== undefined ? m[2] : m[3].toLowerCase();
+      const value = m[2] !== undefined ? m[2] : m[3] !== undefined ? m[3].toLowerCase() : m[4];
       if (section === 'cloud') {
         if (m[1] === 'provider') result.provider = value;
         else if (m[1] === 'dedup') result.dedup = value === 'true';
+        else if (m[1] === 'log_keep_days') result.logKeepDays = parseInt(value, 10);
         continue;
       }
       const keyMap = PROVIDER_KEY_MAPS[section];
@@ -215,6 +216,8 @@ function loadConfig(args) {
   const parsedQuality = rawQuality ? parseInt(rawQuality, 10) : NaN;
 
   const envDedup = (process.env.CLOUD_DEDUP || '').toLowerCase();
+  const envKeepDays = parseInt(process.env.CLOUD_LOG_KEEP_DAYS || '', 10);
+  const keepDays = Number.isNaN(envKeepDays) ? local.logKeepDays : envKeepDays;
 
   return {
     provider,
@@ -223,6 +226,7 @@ function loadConfig(args) {
     publicUrl: get('public_url'),
     defaultQuality: Number.isNaN(parsedQuality) ? 80 : parsedQuality,
     dedup: envDedup ? envDedup === 'true' : local.dedup === true,
+    logKeepDays: Number.isInteger(keepDays) && keepDays >= 1 ? keepDays : 7,
   };
 }
 
@@ -573,7 +577,24 @@ function formatLocalDate(d) {
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
 }
 
-async function writeUploadLog(results) {
+async function pruneOldLogs(keepDays) {
+  const dir = getLogDir();
+  let files = [];
+  try {
+    files = (await fs.readdir(dir))
+      .filter((f) => /^\d{4}-\d{2}-\d{2}-upload-log\.json$/.test(f))
+      .sort(); // oldest first
+  } catch {
+    return;
+  }
+  const excess = files.length - keepDays;
+  for (let i = 0; i < excess; i++) {
+    await fs.unlink(path.join(dir, files[i]));
+    console.error(`Log retention: removed ${files[i]} (keeping last ${keepDays} days)`);
+  }
+}
+
+async function writeUploadLog(results, keepDays) {
   const dir = getLogDir();
   await fs.mkdir(dir, { recursive: true });
   const logPath = path.join(dir, `${formatLocalDate(new Date())}-upload-log.json`);
@@ -630,6 +651,7 @@ async function writeUploadLog(results) {
   log.success.total = log.success.list.length;
   log.error.total = log.error.list.length;
   await fs.writeFile(logPath, JSON.stringify(log, null, 2), 'utf8');
+  await pruneOldLogs(keepDays);
   return logPath;
 }
 
@@ -677,7 +699,7 @@ async function main() {
   const logResults = results.filter((r) => !r.dryRun && !r.deduped);
   if (logResults.length) {
     try {
-      const logPath = await writeUploadLog(logResults);
+      const logPath = await writeUploadLog(logResults, config.logKeepDays);
       console.error(`Upload log written to ${logPath}`);
     } catch (err) {
       console.error(`Failed to write upload log: ${err.message}`);

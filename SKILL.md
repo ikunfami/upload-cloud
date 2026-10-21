@@ -43,6 +43,7 @@ Configuration is read from (in priority order — environment variables win):
 [skills.cloud]
 provider = "aliyun"   # Default provider when the user does not specify one
 dedup = false         # true = skip re-uploading a file whose local path already has a successful record in the upload logs
+log_keep_days = 7     # How many daily log files to keep; oldest files beyond this are deleted on each upload
 
 [skills.cloud.aliyun]
 access_key_id = "LTAI..."
@@ -95,7 +96,7 @@ default_quality = 80
 
 Only the table for the chosen provider needs to be filled. If that table does not exist or any required field is empty, prompt the user to fill in real credentials first (and tell them where to get them — see the per-provider links above). Never commit `config.toml` with real credentials.
 
-Environment variable names follow the config keys: `CLOUD_PROVIDER`, `CLOUD_DEDUP` (`true` / `false`), `OSS_ACCESS_KEY_ID`, `COS_SECRET_ID`, `SMMS_TOKEN`, `GITHUB_TOKEN` / `GITHUB_OWNER` / `GITHUB_REPO` / `GITHUB_BRANCH`, `QINIU_ACCESS_KEY` / `QINIU_DOMAIN`, `IMGUR_CLIENT_ID`, `UPYUN_BUCKET` / `UPYUN_OPERATOR` / `UPYUN_PASSWORD` / `UPYUN_DOMAIN`, etc.
+Environment variable names follow the config keys: `CLOUD_PROVIDER`, `CLOUD_DEDUP` (`true` / `false`), `CLOUD_LOG_KEEP_DAYS` (integer), `OSS_ACCESS_KEY_ID`, `COS_SECRET_ID`, `SMMS_TOKEN`, `GITHUB_TOKEN` / `GITHUB_OWNER` / `GITHUB_REPO` / `GITHUB_BRANCH`, `QINIU_ACCESS_KEY` / `QINIU_DOMAIN`, `IMGUR_CLIENT_ID`, `UPYUN_BUCKET` / `UPYUN_OPERATOR` / `UPYUN_PASSWORD` / `UPYUN_DOMAIN`, etc.
 
 ## Workflow
 1. **Determine the provider** from the user's request using the alias table; if unspecified, use the `provider` default from the config.
@@ -162,6 +163,7 @@ Environment variable names follow the config keys: `CLOUD_PROVIDER`, `CLOUD_DEDU
 
 - Each record contains: `time` (ISO), `localPath` (local file path), `url` (returned public URL, `null` in `error`), `key` (object key), `provider`, `size` (uploaded bytes), `originalSize` (local file bytes), `type` (MIME type), and `error` (only in `error` entries).
 - `--dry-run` uploads are not logged. A log-write failure does not affect the upload result or exit code.
+- **Retention**: after each logged upload, only the most recent `log_keep_days` daily log files (default **7**) are kept — the oldest files beyond that are deleted automatically.
 
 ## Deduplication
 - When `dedup = true` in the `[skills.cloud]` table (or `CLOUD_DEDUP=true`), the script searches all daily log files before uploading: if the **local file path** already has a successful record, the upload is skipped and the existing URL is returned instead (the result carries `"deduped": true` and `firstUploadedAt`).
@@ -354,12 +356,13 @@ function readLocalConfig() {
         section = sec[1] || 'cloud';
         continue;
       }
-      const m = line.match(/^\s*([A-Za-z0-9_]+)\s*=\s*(?:"([^"]*)"|(true|false))\s*$/i);
+      const m = line.match(/^\s*([A-Za-z0-9_]+)\s*=\s*(?:"([^"]*)"|(true|false)|(\d+))\s*$/i);
       if (!m || !section) continue;
-      const value = m[2] !== undefined ? m[2] : m[3].toLowerCase();
+      const value = m[2] !== undefined ? m[2] : m[3] !== undefined ? m[3].toLowerCase() : m[4];
       if (section === 'cloud') {
         if (m[1] === 'provider') result.provider = value;
         else if (m[1] === 'dedup') result.dedup = value === 'true';
+        else if (m[1] === 'log_keep_days') result.logKeepDays = parseInt(value, 10);
         continue;
       }
       const keyMap = PROVIDER_KEY_MAPS[section];
@@ -416,6 +419,8 @@ function loadConfig(args) {
   const parsedQuality = rawQuality ? parseInt(rawQuality, 10) : NaN;
 
   const envDedup = (process.env.CLOUD_DEDUP || '').toLowerCase();
+  const envKeepDays = parseInt(process.env.CLOUD_LOG_KEEP_DAYS || '', 10);
+  const keepDays = Number.isNaN(envKeepDays) ? local.logKeepDays : envKeepDays;
 
   return {
     provider,
@@ -424,6 +429,7 @@ function loadConfig(args) {
     publicUrl: get('public_url'),
     defaultQuality: Number.isNaN(parsedQuality) ? 80 : parsedQuality,
     dedup: envDedup ? envDedup === 'true' : local.dedup === true,
+    logKeepDays: Number.isInteger(keepDays) && keepDays >= 1 ? keepDays : 7,
   };
 }
 
@@ -774,7 +780,24 @@ function formatLocalDate(d) {
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
 }
 
-async function writeUploadLog(results) {
+async function pruneOldLogs(keepDays) {
+  const dir = getLogDir();
+  let files = [];
+  try {
+    files = (await fs.readdir(dir))
+      .filter((f) => /^\d{4}-\d{2}-\d{2}-upload-log\.json$/.test(f))
+      .sort(); // oldest first
+  } catch {
+    return;
+  }
+  const excess = files.length - keepDays;
+  for (let i = 0; i < excess; i++) {
+    await fs.unlink(path.join(dir, files[i]));
+    console.error(`Log retention: removed ${files[i]} (keeping last ${keepDays} days)`);
+  }
+}
+
+async function writeUploadLog(results, keepDays) {
   const dir = getLogDir();
   await fs.mkdir(dir, { recursive: true });
   const logPath = path.join(dir, `${formatLocalDate(new Date())}-upload-log.json`);
@@ -831,6 +854,7 @@ async function writeUploadLog(results) {
   log.success.total = log.success.list.length;
   log.error.total = log.error.list.length;
   await fs.writeFile(logPath, JSON.stringify(log, null, 2), 'utf8');
+  await pruneOldLogs(keepDays);
   return logPath;
 }
 
@@ -878,7 +902,7 @@ async function main() {
   const logResults = results.filter((r) => !r.dryRun && !r.deduped);
   if (logResults.length) {
     try {
-      const logPath = await writeUploadLog(logResults);
+      const logPath = await writeUploadLog(logResults, config.logKeepDays);
       console.error(`Upload log written to ${logPath}`);
     } catch (err) {
       console.error(`Failed to write upload log: ${err.message}`);
