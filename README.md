@@ -11,6 +11,7 @@
 - 配置默认值：用户没指定时回落到 `config.toml` 里的 `provider`（默认 `aliyun`）
 - 支持任意文件类型，图片自动压缩（可配默认质量）、限制最大宽高、目标文件大小
 - 批量上传（`--file` 可传多个），上传后输出 JSON 公共 URL
+- 每日上传日志：成功/失败分类记录到 `%APPDATA%\upload-cloud\YYYY-MM-DD-upload-log.json`，只保留最近 7 天（天数可配），并支持按本地路径去重（可选开启）
 - 三种配置方式，按优先级：环境变量 > 脚本旁 `config.toml` > Agent 从 `~/.kimi-code/config.toml` 导出
 
 ## 快速开始
@@ -51,6 +52,8 @@ node upload.js --file ./test.png --provider upyun     # 又拍云
 ```toml
 [skills.cloud]
 provider = "aliyun"   # 默认值：用户没说上传到哪里时用哪个
+dedup = false         # true = 按本地路径去重：已传过的文件直接返回已有 URL，不重复上传
+log_keep_days = 7     # 日志保留天数，只保留最近 N 个每日日志文件
 
 [skills.cloud.aliyun]
 access_key_id = ""            # 必填
@@ -101,7 +104,7 @@ prefix = "uploads"
 default_quality = 80
 ```
 
-也可以用环境变量代替 `config.toml`：`CLOUD_PROVIDER` + 各服务商的变量（`OSS_*`、`COS_*`、`SMMS_TOKEN`、`GITHUB_TOKEN` / `GITHUB_OWNER` / `GITHUB_REPO`、`QINIU_*`、`IMGUR_CLIENT_ID`、`UPYUN_*`）。
+也可以用环境变量代替 `config.toml`：`CLOUD_PROVIDER`、`CLOUD_DEDUP`（`true`/`false`）、`CLOUD_LOG_KEEP_DAYS`（天数）+ 各服务商的变量（`OSS_*`、`COS_*`、`SMMS_TOKEN`、`GITHUB_TOKEN` / `GITHUB_OWNER` / `GITHUB_REPO`、`QINIU_*`、`IMGUR_CLIENT_ID`、`UPYUN_*`）。
 
 > ⚠️ `config.toml` 包含真实凭证，已被 `.gitignore` 排除，不要提交到仓库。
 
@@ -190,7 +193,7 @@ dedup = true   # 默认 false；也可用环境变量 CLOUD_DEDUP=true
 - Kimi Code: `~/.agents/skills/upload-cloud/`
 - Claude Code: `~/.claude/skills/upload-cloud/`
 
-然后在 Agent 里说"把 xx 文件上传到 OSS / 腾讯云 / 图床"即可触发。Agent 会读取 `SKILL.md` 中的工作流：识别服务商 → 解析配置 → 准备脚本 → 执行上传 → 返回 URL。
+然后在 Agent 里说"把 xx 文件上传到 OSS / 腾讯云 / 图床"即可触发。Agent 会读取 `SKILL.md` 中的工作流：识别服务商 → 解析配置 → 去重检查（如开启）→ 执行上传 → 写日志并清理过期日志 → 返回 URL。
 
 ## 目录结构
 
