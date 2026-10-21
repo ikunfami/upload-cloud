@@ -528,18 +528,26 @@ async function writeUploadLog(results) {
   await fs.mkdir(dir, { recursive: true });
   const logPath = path.join(dir, `${formatLocalDate(new Date())}-upload-log.json`);
 
-  let log = { success: [], error: [] };
+  const emptyLog = () => ({ total: 0, list: [] });
+  let log = { success: emptyLog(), error: emptyLog() };
   if (existsSync(logPath)) {
     try {
       const parsed = JSON.parse(await fs.readFile(logPath, 'utf8'));
+      const takeList = (bucket) => {
+        if (Array.isArray(bucket)) return bucket; // v1: bare array
+        if (bucket && Array.isArray(bucket.list)) return bucket.list; // v2: { total, list }
+        return null;
+      };
       if (Array.isArray(parsed)) {
-        // migrate old flat-array format
+        // migrate v0 flat-array format
         for (const r of parsed) {
-          (r && r.status === 'failed' ? log.error : log.success).push(r);
+          ((r && r.status === 'failed' ? log.error : log.success).list).push(r);
         }
       } else if (parsed && typeof parsed === 'object') {
-        if (Array.isArray(parsed.success)) log.success = parsed.success;
-        if (Array.isArray(parsed.error)) log.error = parsed.error;
+        for (const cat of ['success', 'error']) {
+          const list = takeList(parsed[cat]);
+          if (list) log[cat].list = list;
+        }
       }
     } catch {
       // corrupted log file: start fresh
@@ -566,9 +574,11 @@ async function writeUploadLog(results) {
         // file unreadable: keep null
       }
     }
-    (r.success ? log.success : log.error).push(entry);
+    (r.success ? log.success : log.error).list.push(entry);
   }
 
+  log.success.total = log.success.list.length;
+  log.error.total = log.error.list.length;
   await fs.writeFile(logPath, JSON.stringify(log, null, 2), 'utf8');
   return logPath;
 }

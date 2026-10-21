@@ -150,7 +150,7 @@ node upload.js --file <path> [--file <path> ...]
 - **Windows**：`%APPDATA%\upload-cloud\YYYY-MM-DD-upload-log.json`（如 `C:\Users\xxx\AppData\Roaming\upload-cloud\2026-10-21-upload-log.json`）
 - **其他系统**：`~/.config/upload-cloud/YYYY-MM-DD-upload-log.json`
 - 目录不存在时自动创建；同一天多次上传追加到同一个文件
-- 文件结构为 `{ "success": [...], "error": [...] }`，记录按成功/失败分别归入两个数组
+- 文件结构为 `{ "success": { "total": n, "list": [...] }, "error": { "total": n, "list": [...] } }`，记录按成功/失败分别归入两个分类，`total` 为该分类的累计条数
 
 每条记录字段：
 
